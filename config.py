@@ -2,9 +2,9 @@ XP_PER_TASK = 10
 XP_BONUS_ALL_TASKS = 50
 LEVEL_XP_BASE = 100  # XP needed per level (linear)
 
-DEFAULT_MORNING_TIME = "08:00"
-DEFAULT_MIDDAY_TIME = "12:00"
-DEFAULT_EVENING_TIME = "20:00"
+DEFAULT_MORNING_TIME = "09:00"
+DEFAULT_MIDDAY_TIME = "13:30"
+DEFAULT_EVENING_TIME = "20:30"
 DEFAULT_TIMEZONE = "UTC"
 
 STREAK_FREEZE_THRESHOLD = 0.5  # >= 50% tasks done = streak frozen (no increment, no reset)
@@ -69,15 +69,23 @@ LEVEL_TITLES = {
     20: "Mythic",
 }
 
-MOTIVATIONAL_MESSAGES = [
-    "You've got this! 💪",
-    "Small steps every day lead to big results. 🚀",
-    "Consistency is the key to success. 🗝️",
-    "Let's make today count! ⚡",
-    "Your future self will thank you. 🙏",
-    "Progress, not perfection. 🌊",
-    "One task at a time. You can do it! 🎯",
-    "Every checkmark is a win. 🏅",
+MOTIVATIONAL_MESSAGES = motivational_quotes = [
+    "🌟 'Do or do not. There is no try.' — Yoda (Star Wars: The Empire Strikes Back)",
+    "⚡ 'Gotta catch 'em all!' — Ash Ketchum (Pokémon)",
+    "🛡️ 'Spartans never die.' — Master Chief (Halo)",
+    "💼 'It's not about changing the world. It's about doing our best to leave the world the way it is.' — Soldier: 92 (Team Fortress 2)",
+    "🔥 'I'm not gonna run away, I never go back on my word!' — Naruto Uzumaki (Naruto)",
+    "⚔️ 'I want to become a swordsman so powerful that I don't have to rely on anyone.' — Roronoa Zoro (One Piece)",
+    "💰 'I have a plan. I just need more money.' — Arthur Morgan (Red Dead Redemption 2)",
+    "🧠 'The mind is everything. What you think, you become.' — Buddha/One Punch Man",
+    "👾 'I am inevitable.' — Thanos (Marvel: Avengers: Endgame)",
+    "✨ 'You must always believe that something wonderful is about to happen.' — Whis (Dragon Ball Super)",
+    "🌙 'It doesn't matter if you betray the world, as long as you don't betray yourself.' — Itachi Uchiha (Naruto)",
+    "🔥 'A man's dream will never die!' — Portgas D. Ace (One Piece)",
+    "🥔 'I'll take a potato chip... and EAT IT!' — Light Yagami (Death Note)",
+    "🌙 'The night is darkest just before the dawn.' — Batman (The Dark Knight Rises)",
+    "💪 'Sasuke, I'm going to kill you and take back everything!' — Naruto Uzumaki (Naruto)",
+    "🦸 'I can't defeat you. So, I'll take my own path to victory.' — Deku (My Hero Academia)",
 ]
 
 SLOT_LABELS = {
