@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -117,6 +117,23 @@ def build_editfield_keyboard(task_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def build_status_keyboard(user_id: int, today: str) -> InlineKeyboardMarkup:
+    """Inline keyboard for /status: Mark done buttons for incomplete tasks + quick-add."""
+    tasks = db.get_active_tasks(user_id)
+    completed_ids = set(db.get_today_completions(user_id, today))
+    buttons = []
+    for task in tasks:
+        if task["id"] not in completed_ids:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"✅ Mark done: {task['name']}",
+                    callback_data=f"manual_done:{task['id']}",
+                )
+            ])
+    buttons.append([InlineKeyboardButton("➕ Add task", callback_data="quick_add:start")])
+    return InlineKeyboardMarkup(buttons)
+
+
 # ---------------------------------------------------------------------------
 # Status display (read-only — no interactive buttons)
 # ---------------------------------------------------------------------------
@@ -222,8 +239,10 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"👋 Hey {name}! Welcome to your *Daily To-Do Bot*!\n\n"
         f"I'll keep you accountable with daily check-ins and help you build streaks. "
         f"Here's what you can do:\n\n"
-        f"• `/addtask <name> [duration]` — Add a task (e.g. `/addtask Study 2h`)\n"
+        f"• `/addtask <name> [duration]` — Add a recurring task (e.g. `/addtask Study 2h`)\n"
         f"• `/status` — View today's task progress\n"
+        f"• `/todo <name>` — Add a one-off to-do item; `/todo` to view the list\n"
+        f"• `/week` — See your last 7 days\n"
         f"• `/starttask` — Start a timer on a task\n"
         f"• `/endtask` — Stop the running timer\n"
         f"• `/edittask` — Edit a task's name or duration\n"
@@ -311,10 +330,12 @@ async def list_tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Read-only view of today's task progress. Tasks are completed automatically by timers."""
+    """Today's task progress with manual-done and quick-add buttons."""
     user = update.effective_user
+    today = date.today().isoformat()
     text = build_status_text(user.id)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    keyboard = build_status_keyboard(user.id, today)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -642,7 +663,142 @@ async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await context.bot.send_message(chat_id=user.id, text=prompt, parse_mode="Markdown")
 
 
+async def todo_complete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    user = update.effective_user
+    task_id = int(query.data.split(":")[1])
+
+    task = db.get_task(task_id, user.id)
+    if not task:
+        await query.answer("Task not found.", show_alert=True)
+        return
+
+    db.deactivate_task(task_id, user.id)
+
+    remaining = db.get_active_adhoc_tasks(user.id)
+    if not remaining:
+        try:
+            await query.edit_message_text(
+                f"✅ *{task['name']}* — done!\n\n📝 *To-Do List is now empty.*\nAdd more with `/todo <task name>`",
+                parse_mode="Markdown",
+            )
+        except BadRequest:
+            pass
+    else:
+        text = "📝 *To-Do List*\n\n" + "\n".join(f"• {t['name']}" for t in remaining)
+        buttons = [
+            [InlineKeyboardButton(f"✓ {t['name']}", callback_data=f"todo_done:{t['id']}")]
+            for t in remaining
+        ]
+        try:
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+        except BadRequest:
+            pass
+
+
+async def manual_complete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    user = update.effective_user
+    task_id = int(query.data.split(":")[1])
+    today = date.today().isoformat()
+
+    task = db.get_task(task_id, user.id)
+    if not task:
+        await query.answer("Task not found.", show_alert=True)
+        return
+
+    inserted = db.mark_task_done(task_id, user.id, today, source="manual")
+    if not inserted:
+        await query.answer("Already marked as done!", show_alert=True)
+        return
+
+    result = gami.process_task_toggle(user.id, task_id, today, True, xp_modifier=0.5)
+
+    # Refresh the status message in-place
+    text = build_status_text(user.id)
+    keyboard = build_status_keyboard(user.id, today)
+    try:
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    except BadRequest:
+        pass
+
+    xp = result["xp_earned"]
+    await context.bot.send_message(
+        chat_id=user.id,
+        text=f"✅ *{task['name']}* marked done!\n✨ +{xp} XP _(manual — 50% rate)_",
+        parse_mode="Markdown",
+    )
+
+    if result["bonus_earned"]:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="🎊 All tasks done today! +50 bonus XP!",
+        )
+    if result["new_achievements"]:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=_achievement_message(result["new_achievements"]),
+            parse_mode="Markdown",
+        )
+    if result["leveled_up"]:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=_level_up_message(result["new_level"]),
+            parse_mode="Markdown",
+        )
+
+
+async def quick_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    context.user_data["pending_add"] = True
+    try:
+        await query.edit_message_text(
+            "📝 *What task do you want to add?*\n\n"
+            "Send the name and optional duration, e.g. `Study 2h` or `Morning run`.\n"
+            "_(Send /status to cancel)_",
+            parse_mode="Markdown",
+        )
+    except BadRequest:
+        await context.bot.send_message(
+            chat_id=update.effective_user.id,
+            text="📝 *What task do you want to add?*\n\nSend the task name (e.g. `Study 2h`).",
+            parse_mode="Markdown",
+        )
+
+
 async def edit_task_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Handle quick-add state (from ➕ Add task button on /status)
+    if context.user_data.get("pending_add"):
+        context.user_data.pop("pending_add", None)
+        user = update.effective_user
+        args = update.message.text.strip().split()
+        duration_minutes = None
+        if len(args) >= 2:
+            parsed = parse_duration(args[-1])
+            if parsed is not None:
+                duration_minutes = parsed
+                args = args[:-1]
+        name = " ".join(args).strip()
+        if not name or len(name) > 100:
+            await update.message.reply_text("Task name too long or empty (max 100 characters).")
+            return
+        db.add_task(user.id, name, duration_minutes=duration_minutes)
+        duration_str = f" _(target: {fmt_minutes(duration_minutes)})_" if duration_minutes else ""
+        today = date.today().isoformat()
+        text = build_status_text(user.id)
+        keyboard = build_status_keyboard(user.id, today)
+        await update.message.reply_text(
+            f"✅ Added: *{name}*{duration_str}", parse_mode="Markdown"
+        )
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        return
+
     pending = context.user_data.get("pending_edit")
     if not pending:
         return
@@ -685,6 +841,86 @@ async def edit_task_reply_handler(update: Update, context: ContextTypes.DEFAULT_
             )
 
     context.user_data.pop("pending_edit", None)
+
+
+async def todo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /todo            — show ad-hoc to-do list with tick buttons
+    /todo <name>     — add a new ad-hoc task
+    """
+    user = update.effective_user
+
+    if context.args:
+        name = " ".join(context.args).strip()
+        if len(name) > 100:
+            await update.message.reply_text("Task name too long (max 100 characters).")
+            return
+        db.add_adhoc_task(user.id, name)
+        await update.message.reply_text(
+            f"📝 Added to your to-do list: *{name}*\n\nUse /todo to view your list.",
+            parse_mode="Markdown",
+        )
+        return
+
+    tasks = db.get_active_adhoc_tasks(user.id)
+    if not tasks:
+        await update.message.reply_text(
+            "📝 *Your To-Do List is empty!*\n\nAdd items with `/todo <task name>`\nExample: `/todo Buy birthday card`",
+            parse_mode="Markdown",
+        )
+        return
+
+    text = "📝 *To-Do List*\n\n" + "\n".join(f"• {t['name']}" for t in tasks)
+    buttons = [
+        [InlineKeyboardButton(f"✓ {t['name']}", callback_data=f"todo_done:{t['id']}")]
+        for t in tasks
+    ]
+    keyboard = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def week_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show last 7 days' completion summary."""
+    user = update.effective_user
+    today = date.today()
+
+    lines = ["📅 *Last 7 Days*", ""]
+    total_done = 0
+    total_possible = 0
+
+    for i in range(6, -1, -1):
+        day = today - timedelta(days=i)
+        day_str = day.isoformat()
+        day_label = day.strftime("%a %-d %b")
+
+        done, total = db.get_completion_fraction(user.id, day_str)
+        total_done += done
+        total_possible += total
+
+        if total == 0:
+            bar = "      "
+            fraction_str = "—"
+        else:
+            filled = int((done / total) * 6)
+            bar = "█" * filled + "░" * (6 - filled)
+            fraction_str = f"{done}/{total}"
+
+        suffix = " ← today" if i == 0 else ""
+        lines.append(f"`{day_label}` [{bar}] {fraction_str}{suffix}")
+
+    lines.append("")
+    if total_possible > 0:
+        rate = int((total_done / total_possible) * 100)
+        lines.append(f"Completion rate: *{rate}%* ({total_done}/{total_possible} tasks done)")
+    else:
+        lines.append("No recurring tasks recorded yet.")
+
+    stats = db.get_user_stats(user.id)
+    if stats:
+        lines.append(f"🔥 Streak: *{stats['current_streak']} day{'s' if stats['current_streak'] != 1 else ''}*")
+        lines.append(f"🏆 Best: *{stats['longest_streak']} day{'s' if stats['longest_streak'] != 1 else ''}*")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def prompt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

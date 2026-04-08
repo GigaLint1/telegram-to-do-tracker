@@ -21,7 +21,9 @@ from handlers import (
     edittask_handler,
     endtask_handler,
     list_tasks_handler,
+    manual_complete_callback,
     prompt_handler,
+    quick_add_callback,
     remove_task_callback,
     remove_task_handler,
     schedule_change_callback,
@@ -31,10 +33,15 @@ from handlers import (
     starttask_handler,
     stats_handler,
     status_handler,
+    todo_complete_callback,
+    todo_handler,
+    week_handler,
 )
 
 BOT_COMMANDS = [
     BotCommand("status",     "View today's task progress"),
+    BotCommand("todo",       "View/add one-off to-do items"),
+    BotCommand("week",       "Last 7 days summary"),
     BotCommand("starttask",  "Start a timer on a task"),
     BotCommand("endtask",    "Stop the running timer"),
     BotCommand("addtask",    "Add a new daily task"),
@@ -82,6 +89,8 @@ def main() -> None:
     application.add_handler(CommandHandler("removetask", remove_task_handler))
     application.add_handler(CommandHandler("listtasks",  list_tasks_handler))
     application.add_handler(CommandHandler("status",     status_handler))
+    application.add_handler(CommandHandler("todo",       todo_handler))
+    application.add_handler(CommandHandler("week",       week_handler))
     application.add_handler(CommandHandler("stats",      stats_handler))
     application.add_handler(CommandHandler("schedule",   schedule_handler))
     application.add_handler(CommandHandler("starttask",  starttask_handler))
@@ -95,6 +104,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(start_task_callback,       pattern=r"^start_task:"))
     application.add_handler(CallbackQueryHandler(edit_task_callback,        pattern=r"^edit_task:"))
     application.add_handler(CallbackQueryHandler(edit_field_callback,       pattern=r"^edit_name:|^edit_duration:"))
+    application.add_handler(CallbackQueryHandler(todo_complete_callback,    pattern=r"^todo_done:"))
+    application.add_handler(CallbackQueryHandler(manual_complete_callback,  pattern=r"^manual_done:"))
+    application.add_handler(CallbackQueryHandler(quick_add_callback,        pattern=r"^quick_add:"))
 
     # Plain-text message handler for pending edittask replies (must be last)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, edit_task_reply_handler))

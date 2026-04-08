@@ -30,7 +30,7 @@ def get_level_title(level: int) -> str:
     return f"Level {level} — {title}"
 
 
-def process_task_toggle(user_id: int, task_id: int, today_str: str, is_now_complete: bool) -> dict:
+def process_task_toggle(user_id: int, task_id: int, today_str: str, is_now_complete: bool, xp_modifier: float = 1.0) -> dict:
     """
     Recalculates gamification state after a task toggle.
     is_now_complete: True if the task was just checked off, False if unchecked.
@@ -55,7 +55,7 @@ def process_task_toggle(user_id: int, task_id: int, today_str: str, is_now_compl
     bonus_earned = False
 
     if is_now_complete:
-        xp_earned += XP_PER_TASK
+        xp_earned += int(XP_PER_TASK * xp_modifier)
         done, total = db.get_completion_fraction(user_id, today_str)
         if total > 0 and done == total:
             xp_earned += XP_BONUS_ALL_TASKS

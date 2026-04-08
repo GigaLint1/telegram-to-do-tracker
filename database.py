@@ -97,6 +97,14 @@ def init_db() -> None:
             conn.execute("ALTER TABLE scheduled_times ADD COLUMN mid_task_prompt TEXT")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'recurring'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE daily_completions ADD COLUMN completion_source TEXT DEFAULT 'timer'")
+        except sqlite3.OperationalError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -160,11 +168,46 @@ def update_task(task_id: int, user_id: int, name: Optional[str] = None, duration
 
 
 def get_active_tasks(user_id: int) -> list:
+    """Returns active recurring tasks only."""
     with get_db() as conn:
         return conn.execute(
-            "SELECT * FROM tasks WHERE user_id = ? AND is_active = 1 ORDER BY id",
+            "SELECT * FROM tasks WHERE user_id = ? AND is_active = 1 AND task_type = 'recurring' ORDER BY id",
             (user_id,),
         ).fetchall()
+
+
+def get_active_adhoc_tasks(user_id: int) -> list:
+    """Returns active ad-hoc (one-off) tasks."""
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND is_active = 1 AND task_type = 'adhoc' ORDER BY id",
+            (user_id,),
+        ).fetchall()
+
+
+def add_adhoc_task(user_id: int, name: str, emoji: str = "📝") -> int:
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO tasks (user_id, name, emoji, task_type) VALUES (?, ?, ?, 'adhoc')",
+            (user_id, name, emoji),
+        )
+        return cur.lastrowid
+
+
+def mark_task_done(task_id: int, user_id: int, today: str, source: str = "timer") -> bool:
+    """Mark a task complete for today (one-way). Returns True if inserted, False if already done."""
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM daily_completions WHERE task_id = ? AND user_id = ? AND date = ?",
+            (task_id, user_id, today),
+        ).fetchone()
+        if existing:
+            return False
+        conn.execute(
+            "INSERT INTO daily_completions (task_id, user_id, date, completion_source) VALUES (?, ?, ?, ?)",
+            (task_id, user_id, today, source),
+        )
+        return True
 
 
 def get_task(task_id: int, user_id: int) -> Optional[sqlite3.Row]:
@@ -219,16 +262,17 @@ def get_today_completions(user_id: int, today: str) -> list[int]:
 
 
 def get_completion_fraction(user_id: int, today: str) -> tuple[int, int]:
+    """Returns (done, total) for active recurring tasks only."""
     with get_db() as conn:
         total = conn.execute(
-            "SELECT COUNT(*) as cnt FROM tasks WHERE user_id = ? AND is_active = 1",
+            "SELECT COUNT(*) as cnt FROM tasks WHERE user_id = ? AND is_active = 1 AND task_type = 'recurring'",
             (user_id,),
         ).fetchone()["cnt"]
         done = conn.execute(
             """
             SELECT COUNT(*) as cnt FROM daily_completions dc
             JOIN tasks t ON dc.task_id = t.id
-            WHERE dc.user_id = ? AND dc.date = ? AND t.is_active = 1
+            WHERE dc.user_id = ? AND dc.date = ? AND t.is_active = 1 AND t.task_type = 'recurring'
             """,
             (user_id, today),
         ).fetchone()["cnt"]

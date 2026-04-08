@@ -54,7 +54,7 @@ async def generate_motivational_message(
     streak_line = f"a {streak}-day streak" if streak > 1 else "just starting their streak today"
 
     prompt = (
-        f"Generate ONE short motivational message (1-2 sentences, max 30 words) for a student. This is their {slot_label} reminder to lock in."
+        f"Generate ONE short motivational message (1-2 sentences) for a student. This is their {slot_label} reminder to lock in."
         f"They have completed {done} out of {total} tasks today."
         f"Currently they have a {streak_line} streak."
         f"Be specific to their situation. Warn them about the dangers of wasting their life and regret."
