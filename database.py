@@ -6,6 +6,11 @@ from typing import Optional
 import os
 DB_PATH = os.environ.get("DB_PATH", "todo_bot.db")
 
+# Ensure the directory exists (important when DB_PATH points to a mounted volume)
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
+
 
 @contextmanager
 def get_db():
