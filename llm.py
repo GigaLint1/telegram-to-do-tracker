@@ -54,14 +54,12 @@ async def generate_motivational_message(
     streak_line = f"a {streak}-day streak" if streak > 1 else "just starting their streak today"
 
     prompt = (
-        f"You are a motivational coach for a productivity app. "
-        f"Generate ONE short motivational message (1-2 sentences, max 30 words) for a user who:\n"
-        f"- Is doing their {slot_label} check-in\n"
-        f"- Has completed {done} out of {total} tasks today\n"
-        f"- Has {streak_line}\n\n"
-        f"Be specific to their situation. Be energetic and concise. "
+        f"Generate ONE short motivational message (1-2 sentences, max 30 words) for a student. This is their {slot_label} reminder to lock in."
+        f"They have completed {done} out of {total} tasks today."
+        f"Currently they have a {streak_line} streak."
+        f"Be specific to their situation. Warn them about the dangers of wasting their life and regret."
         f"Do not use generic filler phrases like 'keep it up' or 'you got this'. "
-        f"Reply with ONLY the message text, no quotes, no emojis."
+        f"Reply with ONLY the message text."
     )
 
     try:
@@ -110,7 +108,6 @@ async def generate_midtask_message(
     elapsed_str = _fmt_secs(elapsed_seconds)
     prompt = (
         f"{custom_prompt}\n\n"
-        f"Context: The user has been working on '{task_name}' for {elapsed_str} in this session. "
         f"Reply with ONLY the message text, no quotes."
     )
 
