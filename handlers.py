@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,19 +25,15 @@ def parse_duration(s: str) -> Optional[int]:
     Returns None if unparseable.
     """
     s = s.strip().lower()
-    # e.g. '1h30m', '1h 30m', '1h30'
     m = re.fullmatch(r'(\d+)\s*h\s*(\d+)\s*m?', s)
     if m:
         return int(m.group(1)) * 60 + int(m.group(2))
-    # e.g. '2h'
     m = re.fullmatch(r'(\d+)\s*h', s)
     if m:
         return int(m.group(1)) * 60
-    # e.g. '30m'
     m = re.fullmatch(r'(\d+)\s*m', s)
     if m:
         return int(m.group(1))
-    # bare number = minutes
     m = re.fullmatch(r'(\d+)', s)
     if m:
         return int(m.group(1))
@@ -65,34 +61,8 @@ def fmt_minutes(minutes: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Keyboard builders
+# Keyboard builders (used by /starttask, /removetask, /edittask, /schedule only)
 # ---------------------------------------------------------------------------
-
-def build_checklist_keyboard(
-    tasks: list,
-    completed_ids: set,
-    session_totals: Optional[dict] = None,
-) -> InlineKeyboardMarkup:
-    buttons = []
-    for task in tasks:
-        done = task["id"] in completed_ids
-        check = "✅" if done else "⬜"
-        label = f"{check} {task['name']}"
-
-        # Append time progress if task has a duration target
-        if session_totals is not None and task["duration_minutes"]:
-            spent_secs = session_totals.get(task["id"], 0)
-            target_secs = task["duration_minutes"] * 60
-            spent_str = fmt_duration(spent_secs)
-            target_str = fmt_minutes(task["duration_minutes"])
-            hit = "✓" if spent_secs >= target_secs else ""
-            label += f"  [{spent_str} / {target_str}{' ' + hit if hit else ''}]"
-
-        buttons.append([InlineKeyboardButton(label, callback_data=f"toggle_task:{task['id']}")])
-
-    buttons.append([InlineKeyboardButton("📊 My Stats", callback_data="show_stats")])
-    return InlineKeyboardMarkup(buttons)
-
 
 def build_remove_keyboard(tasks: list) -> InlineKeyboardMarkup:
     buttons = [
@@ -146,22 +116,80 @@ def build_editfield_keyboard(task_id: int) -> InlineKeyboardMarkup:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Status display (read-only — no interactive buttons)
 # ---------------------------------------------------------------------------
 
-def _checklist_header(tasks: list, completed_ids: set) -> str:
-    done = len([t for t in tasks if t["id"] in completed_ids])
-    total = len(tasks)
-    bar = _progress_bar(done, total)
-    return f"📋 *Today's Tasks* — {done}/{total} done {bar}"
+def build_status_text(user_id: int) -> str:
+    """
+    Build the read-only /status message text.
+    Shows each task's completion state, time tracked today, and running timer.
+    """
+    today = date.today().isoformat()
+    today_label = datetime.now().strftime("%a %-d %b")
+
+    tasks = db.get_active_tasks(user_id)
+    if not tasks:
+        return "No active tasks. Add one with /addtask!"
+
+    completed_ids = set(db.get_today_completions(user_id, today))
+    totals = db.get_today_totals_including_active(user_id, today)
+    active_session = db.get_active_session(user_id)
+    active_task_id = active_session["task_id"] if active_session else None
+
+    lines = [f"📋 *Today's Status* — {today_label}", ""]
+
+    max_name_len = max(len(t["name"]) for t in tasks)
+
+    for task in tasks:
+        tid = task["id"]
+        is_done = tid in completed_ids
+        is_active = tid == active_task_id
+        spent_secs = totals.get(tid, 0)
+
+        if is_done:
+            icon = "✅"
+        elif is_active:
+            icon = "⏱️"
+        else:
+            icon = "⬜"
+
+        name_padded = task["name"]
+
+        if task["duration_minutes"]:
+            target_secs = task["duration_minutes"] * 60
+            hit = " ✓" if spent_secs >= target_secs else ""
+            time_str = f"[{fmt_duration(spent_secs)} / {fmt_minutes(task['duration_minutes'])}{hit}]"
+        elif spent_secs > 0:
+            time_str = f"[tracked: {fmt_duration(spent_secs)}]"
+        else:
+            time_str = ""
+
+        line = f"{icon} {name_padded}"
+        if time_str:
+            line += f"  {time_str}"
+        if is_active:
+            line += "  ← running"
+        lines.append(line)
+
+    # Progress bar
+    done_count = len(completed_ids)
+    total_count = len(tasks)
+    filled = int((done_count / total_count) * 8) if total_count else 0
+    bar = "[" + "█" * filled + "░" * (8 - filled) + "]"
+
+    lines.append("")
+    lines.append(f"Progress: {done_count}/{total_count} complete {bar}")
+
+    stats = db.get_user_stats(user_id)
+    if stats and stats["current_streak"] > 0:
+        lines.append(f"🔥 Streak: {stats['current_streak']} day{'s' if stats['current_streak'] != 1 else ''}")
+
+    return "\n".join(lines)
 
 
-def _progress_bar(done: int, total: int, length: int = 8) -> str:
-    if total == 0:
-        return ""
-    filled = int((done / total) * length)
-    return "[" + "█" * filled + "░" * (length - filled) + "]"
-
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 def _achievement_message(keys: list[str]) -> str:
     lines = ["🏆 *Achievement Unlocked!*"]
@@ -174,16 +202,6 @@ def _achievement_message(keys: list[str]) -> str:
 def _level_up_message(new_level: int) -> str:
     title = gami.get_level_title(new_level)
     return f"🎉 *Level Up!*\nYou reached {title}!"
-
-
-def _get_checklist(user_id: int):
-    today = date.today().isoformat()
-    tasks = db.get_active_tasks(user_id)
-    completed_ids = set(db.get_today_completions(user_id, today))
-    session_totals = db.get_today_session_totals(user_id, today)
-    header = _checklist_header(tasks, completed_ids)
-    keyboard = build_checklist_keyboard(tasks, completed_ids, session_totals)
-    return header, keyboard
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +221,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"I'll keep you accountable with daily check-ins and help you build streaks. "
         f"Here's what you can do:\n\n"
         f"• `/addtask <name> [duration]` — Add a task (e.g. `/addtask Study 2h`)\n"
-        f"• `/checkin` — View & tick off today's tasks\n"
+        f"• `/status` — View today's task progress\n"
         f"• `/starttask` — Start a timer on a task\n"
         f"• `/endtask` — Stop the running timer\n"
         f"• `/edittask` — Edit a task's name or duration\n"
@@ -211,6 +229,8 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• `/listtasks` — View all your tasks\n"
         f"• `/removetask` — Remove a task\n"
         f"• `/schedule` — Change your reminder times\n\n"
+        f"Tasks with a duration target are *automatically completed* once you've "
+        f"timed enough sessions to hit the target for the day. 🎯\n\n"
         f"I'll message you at *8:00 AM*, *12:00 PM*, and *8:00 PM* (UTC) by default.\n"
         f"Start by adding your first task! 🚀",
         parse_mode="Markdown",
@@ -230,10 +250,9 @@ async def add_task_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    args = context.args
+    args = list(context.args)
     duration_minutes = None
 
-    # Try to parse last token as a duration
     if len(args) >= 2:
         parsed = parse_duration(args[-1])
         if parsed is not None:
@@ -258,7 +277,7 @@ async def add_task_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     duration_str = f" _(target: {fmt_minutes(duration_minutes)})_" if duration_minutes else ""
     await update.message.reply_text(
-        f"✅ Added: *{name}*{duration_str}\nUse /checkin to see your updated list.",
+        f"✅ Added: *{name}*{duration_str}\nUse /status to see your updated list.",
         parse_mode="Markdown",
     )
 
@@ -289,18 +308,11 @@ async def list_tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-async def checkin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read-only view of today's task progress. Tasks are completed automatically by timers."""
     user = update.effective_user
-    tasks = db.get_active_tasks(user.id)
-    if not tasks:
-        await update.message.reply_text(
-            "You have no tasks yet! Add some with `/addtask <name>`.",
-            parse_mode="Markdown",
-        )
-        return
-
-    header, keyboard = _get_checklist(user.id)
-    await update.message.reply_text(header, reply_markup=keyboard, parse_mode="Markdown")
+    text = build_status_text(user.id)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -349,7 +361,6 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def starttask_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
 
-    # Block if a session is already running
     active = db.get_active_session(user.id)
     if active:
         await update.message.reply_text(
@@ -377,31 +388,65 @@ async def endtask_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     active = db.get_active_session(user.id)
 
     if not active:
-        await update.message.reply_text(
-            "No active timer. Start one with /starttask."
-        )
+        await update.message.reply_text("No active timer. Start one with /starttask.")
         return
 
-    elapsed = db.end_session(active["id"])
+    task_id = active["task_id"]
     task_name = active["task_name"]
     duration_minutes = active["duration_minutes"]
+    today = date.today().isoformat()
+
+    elapsed = db.end_session(active["id"])
+
+    # Get totals NOW (includes the session just ended)
+    totals = db.get_today_totals_including_active(user.id, today)
+    total_today = totals.get(task_id, elapsed)
 
     lines = [
         f"⏹️ *{task_name}* — session ended",
-        f"⏱️ Time: *{fmt_duration(elapsed)}*",
+        f"⏱️ Session: *{fmt_duration(elapsed)}*",
+        f"📅 Total today: *{fmt_duration(total_today)}*",
     ]
 
     if duration_minutes:
         target_secs = duration_minutes * 60
-        pct = int((elapsed / target_secs) * 100) if target_secs > 0 else 0
-        lines.append(f"🎯 Target: {fmt_minutes(duration_minutes)} ({pct}% complete)")
+        pct = int((total_today / target_secs) * 100) if target_secs > 0 else 0
+        lines.append(f"🎯 Target: {fmt_minutes(duration_minutes)} ({pct}% of daily goal)")
 
-    if elapsed >= 1800:  # 30+ minutes — give encouragement
-        lines.append("🔥 Great focus session!")
-    elif elapsed >= 600:  # 10+ minutes
-        lines.append("👍 Nice work!")
+    # Auto-complete check
+    auto_completed = False
+    if duration_minutes:
+        target_secs = duration_minutes * 60
+        already_done = task_id in db.get_today_completions(user.id, today)
+        if not already_done and total_today >= target_secs:
+            db.toggle_task_completion(task_id, user.id, today)
+            result = gami.process_task_toggle(user.id, task_id, today, True)
+            auto_completed = True
+            lines.append(f"\n🎯 *Target reached! Task auto-completed!*")
+            lines.append(f"✨ +{result['xp_earned']} XP earned")
+            if result["bonus_earned"]:
+                lines.append(f"🎊 All tasks done today! +50 bonus XP!")
+            stats = db.get_user_stats(user.id)
+            if stats and stats["current_streak"] > 0:
+                lines.append(f"🔥 Streak: {stats['current_streak']} day(s)")
+
+    if not auto_completed:
+        if elapsed >= 1800:
+            lines.append("🔥 Great focus session!")
+        elif elapsed >= 600:
+            lines.append("👍 Nice work!")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    if auto_completed:
+        if result["new_achievements"]:
+            await update.message.reply_text(
+                _achievement_message(result["new_achievements"]), parse_mode="Markdown"
+            )
+        if result["leveled_up"]:
+            await update.message.reply_text(
+                _level_up_message(result["new_level"]), parse_mode="Markdown"
+            )
 
 
 async def edittask_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -422,50 +467,6 @@ async def edittask_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ---------------------------------------------------------------------------
 # Callback query handlers
 # ---------------------------------------------------------------------------
-
-async def toggle_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-
-    user = update.effective_user
-    task_id = int(query.data.split(":")[1])
-    today = date.today().isoformat()
-
-    is_now_complete = db.toggle_task_completion(task_id, user.id, today)
-    result = gami.process_task_toggle(user.id, task_id, today, is_now_complete)
-
-    header, keyboard = _get_checklist(user.id)
-
-    try:
-        await query.edit_message_text(text=header, reply_markup=keyboard, parse_mode="Markdown")
-    except BadRequest:
-        await context.bot.send_message(
-            chat_id=user.id, text=header, reply_markup=keyboard, parse_mode="Markdown"
-        )
-
-    if is_now_complete and result["bonus_earned"]:
-        stats = db.get_user_stats(user.id)
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=f"🎊 *All tasks done!* +{result['xp_earned']} XP (includes +50 bonus!)\n"
-                 f"Streak: 🔥 {stats['current_streak']} day(s)",
-            parse_mode="Markdown",
-        )
-
-    if result["new_achievements"]:
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=_achievement_message(result["new_achievements"]),
-            parse_mode="Markdown",
-        )
-
-    if result["leveled_up"]:
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=_level_up_message(result["new_level"]),
-            parse_mode="Markdown",
-        )
-
 
 async def remove_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -506,15 +507,6 @@ async def schedule_change_callback(update: Update, context: ContextTypes.DEFAULT
     await query.answer(f"Use /schedule {slot_key.replace('_time', '')} HH:MM to update", show_alert=True)
 
 
-async def show_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    db.ensure_user_stats(user.id)
-    msg = gami.format_stats_message(user.id)
-    await context.bot.send_message(chat_id=user.id, text=msg, parse_mode="Markdown")
-
-
 async def start_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -522,7 +514,6 @@ async def start_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.effective_user
     task_id = int(query.data.split(":")[1])
 
-    # Check again in case another session started between showing keyboard and tapping
     active = db.get_active_session(user.id)
     if active:
         try:
@@ -560,7 +551,6 @@ async def start_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def edit_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show name/duration choice buttons for the selected task."""
     query = update.callback_query
     await query.answer()
 
@@ -585,12 +575,11 @@ async def edit_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Set pending edit state and prompt the user to type the new value."""
     query = update.callback_query
     await query.answer()
 
     parts = query.data.split(":")
-    field = parts[0]   # 'edit_name' or 'edit_duration'
+    field = parts[0]
     task_id = int(parts[1])
 
     user = update.effective_user
@@ -620,10 +609,9 @@ async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def edit_task_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Captures the plain-text reply for a pending edit."""
     pending = context.user_data.get("pending_edit")
     if not pending:
-        return  # Not waiting for an edit reply — ignore
+        return
 
     user = update.effective_user
     task_id = pending["task_id"]
@@ -641,9 +629,7 @@ async def edit_task_reply_handler(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("Name too long (max 100 characters). Try again:")
             return
         db.update_task(task_id, user.id, name=text)
-        await update.message.reply_text(
-            f"✅ Task renamed to *{text}*.", parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"✅ Task renamed to *{text}*.", parse_mode="Markdown")
 
     elif field == "duration":
         if text.lower() == "none":

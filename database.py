@@ -404,3 +404,26 @@ def get_today_session_totals(user_id: int, date_str: str) -> dict[int, int]:
             (user_id, date_str),
         ).fetchall()
         return {r["task_id"]: r["total"] for r in rows}
+
+
+def get_today_totals_including_active(user_id: int, date_str: str) -> dict[int, int]:
+    """
+    Like get_today_session_totals but also adds live elapsed time of any active session.
+    Used for the /status display and auto-complete threshold check.
+    Returns {task_id: total_seconds_today}.
+    """
+    totals = get_today_session_totals(user_id, date_str)
+    # Add the currently running session's live elapsed time
+    with get_db() as conn:
+        active = conn.execute(
+            "SELECT task_id, started_at FROM task_sessions WHERE user_id = ? AND ended_at IS NULL",
+            (user_id,),
+        ).fetchone()
+    if active:
+        started = datetime.fromisoformat(active["started_at"])
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        elapsed = int((datetime.now(timezone.utc) - started).total_seconds())
+        tid = active["task_id"]
+        totals[tid] = totals.get(tid, 0) + elapsed
+    return totals

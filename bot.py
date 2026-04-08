@@ -2,7 +2,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -15,7 +15,6 @@ import database as db
 import scheduler as sched
 from handlers import (
     add_task_handler,
-    checkin_handler,
     edit_field_callback,
     edit_task_callback,
     edit_task_reply_handler,
@@ -26,13 +25,31 @@ from handlers import (
     remove_task_handler,
     schedule_change_callback,
     schedule_handler,
-    show_stats_callback,
     start_handler,
     start_task_callback,
     starttask_handler,
     stats_handler,
-    toggle_task_callback,
+    status_handler,
 )
+
+BOT_COMMANDS = [
+    BotCommand("status",     "View today's task progress"),
+    BotCommand("starttask",  "Start a timer on a task"),
+    BotCommand("endtask",    "Stop the running timer"),
+    BotCommand("addtask",    "Add a new daily task"),
+    BotCommand("edittask",   "Edit a task's name or duration"),
+    BotCommand("removetask", "Remove a task"),
+    BotCommand("listtasks",  "List all active tasks"),
+    BotCommand("stats",      "View XP, level, and streak"),
+    BotCommand("schedule",   "Change reminder times"),
+    BotCommand("start",      "Welcome and setup"),
+]
+
+
+async def post_init(application) -> None:
+    """Runs once after the bot is initialised — sets the command menu in Telegram."""
+    await application.bot.set_my_commands(BOT_COMMANDS)
+    logging.getLogger(__name__).info("Bot command menu set.")
 
 
 def main() -> None:
@@ -50,14 +67,19 @@ def main() -> None:
 
     db.init_db()
 
-    application = ApplicationBuilder().token(token).build()
+    application = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(post_init)
+        .build()
+    )
 
     # Commands
     application.add_handler(CommandHandler("start",      start_handler))
     application.add_handler(CommandHandler("addtask",    add_task_handler))
     application.add_handler(CommandHandler("removetask", remove_task_handler))
     application.add_handler(CommandHandler("listtasks",  list_tasks_handler))
-    application.add_handler(CommandHandler("checkin",    checkin_handler))
+    application.add_handler(CommandHandler("status",     status_handler))
     application.add_handler(CommandHandler("stats",      stats_handler))
     application.add_handler(CommandHandler("schedule",   schedule_handler))
     application.add_handler(CommandHandler("starttask",  starttask_handler))
@@ -65,15 +87,13 @@ def main() -> None:
     application.add_handler(CommandHandler("edittask",   edittask_handler))
 
     # Callback queries
-    application.add_handler(CallbackQueryHandler(toggle_task_callback,   pattern=r"^toggle_task:"))
-    application.add_handler(CallbackQueryHandler(remove_task_callback,   pattern=r"^remove_task:"))
-    application.add_handler(CallbackQueryHandler(schedule_change_callback, pattern=r"^schedule_set:"))
-    application.add_handler(CallbackQueryHandler(show_stats_callback,    pattern=r"^show_stats$"))
-    application.add_handler(CallbackQueryHandler(start_task_callback,    pattern=r"^start_task:"))
-    application.add_handler(CallbackQueryHandler(edit_task_callback,     pattern=r"^edit_task:"))
-    application.add_handler(CallbackQueryHandler(edit_field_callback,    pattern=r"^edit_name:|^edit_duration:"))
+    application.add_handler(CallbackQueryHandler(remove_task_callback,      pattern=r"^remove_task:"))
+    application.add_handler(CallbackQueryHandler(schedule_change_callback,  pattern=r"^schedule_set:"))
+    application.add_handler(CallbackQueryHandler(start_task_callback,       pattern=r"^start_task:"))
+    application.add_handler(CallbackQueryHandler(edit_task_callback,        pattern=r"^edit_task:"))
+    application.add_handler(CallbackQueryHandler(edit_field_callback,       pattern=r"^edit_name:|^edit_duration:"))
 
-    # Message handler for pending edittask replies (must be last)
+    # Plain-text message handler for pending edittask replies (must be last)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, edit_task_reply_handler))
 
     # Seed all scheduled jobs from DB

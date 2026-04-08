@@ -4,15 +4,8 @@ All PTB JobQueue job functions and helpers to register/remove per-user jobs.
 PTB v20+ manages the asyncio event loop internally via run_polling().
 Jobs MUST be registered via application.job_queue.run_daily() — never via
 a standalone APScheduler instance, which would create event loop conflicts.
-
-Job naming convention:
-    reminder_{user_id}_morning
-    reminder_{user_id}_midday
-    reminder_{user_id}_evening
-    streak_eod_{user_id}
 """
 
-import random
 import logging
 from datetime import time as dt_time, date
 
@@ -21,7 +14,8 @@ from telegram.ext import ContextTypes
 
 import database as db
 import gamification as gami
-from config import MOTIVATIONAL_MESSAGES, SLOT_LABELS
+import llm
+from config import SLOT_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +25,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 async def send_checkin_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the interactive checklist to the user at a scheduled time."""
+    """Sends the read-only status reminder to the user at a scheduled time."""
     data = context.job.data
     user_id = data["user_id"]
     slot = data["slot"]
@@ -39,36 +33,39 @@ async def send_checkin_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     tasks = db.get_active_tasks(user_id)
     if not tasks:
-        return  # No tasks — skip the reminder
+        return
 
     today = date.today().isoformat()
     completed_ids = set(db.get_today_completions(user_id, today))
     done = len([t for t in tasks if t["id"] in completed_ids])
     total = len(tasks)
 
-    slot_label = SLOT_LABELS.get(f"{slot}_time", slot.capitalize())
-    motivation = random.choice(MOTIVATIONAL_MESSAGES)
+    stats = db.get_user_stats(user_id)
+    streak = stats["current_streak"] if stats else 0
+
+    # LLM-generated (or static fallback) motivational message
+    motivation = await llm.generate_motivational_message(slot, done, total, streak)
 
     if slot == "morning":
-        greeting = f"🌅 *Good morning!* {motivation}\n\nHere's your daily checklist:"
+        greeting = f"🌅 *Good morning!*\n_{motivation}_\n\nHere's your day:"
     elif slot == "midday":
         pct = int((done / total) * 100) if total > 0 else 0
-        greeting = f"☀️ *Midday check-in!* You're {pct}% done today.\n\nKeep it up:"
-    else:  # evening
+        greeting = f"☀️ *Midday check-in!* You're {pct}% done.\n_{motivation}_"
+    else:
         if done == total and total > 0:
-            greeting = f"🌙 *Evening wrap-up!* 🎉 You completed everything today! Amazing work!"
+            greeting = f"🌙 *Evening wrap-up!* 🎉 You completed everything today!\n_{motivation}_"
         else:
             remaining = total - done
-            greeting = f"🌙 *Evening wrap-up!* {remaining} task{'s' if remaining != 1 else ''} still to go:"
+            greeting = f"🌙 *Evening wrap-up!* {remaining} task{'s' if remaining != 1 else ''} to go.\n_{motivation}_"
 
-    from handlers import build_checklist_keyboard  # avoid circular import at module level
-    keyboard = build_checklist_keyboard(tasks, completed_ids)
+    # Build read-only status text
+    from handlers import build_status_text
+    status = build_status_text(user_id)
 
     try:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=greeting,
-            reply_markup=keyboard,
+            text=f"{greeting}\n\n{status}",
             parse_mode="Markdown",
         )
     except Exception as e:
@@ -76,14 +73,14 @@ async def send_checkin_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def end_of_day_streak_update(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Global job at 23:59 UTC — finalizes streaks for all users."""
+    """Global job at 23:59 UTC — finalises streaks for all users."""
     today = date.today().isoformat()
     users = db.get_all_users_with_schedule()
     for row in users:
         try:
             gami.finalize_daily_streaks(row["user_id"], today)
         except Exception as e:
-            logger.error(f"Streak finalization failed for {row['user_id']}: {e}")
+            logger.error(f"Streak finalisation failed for {row['user_id']}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +88,6 @@ async def end_of_day_streak_update(context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 
 def _parse_hhmm(time_str: str):
-    """Parse 'HH:MM' into (hour, minute)."""
     h, m = time_str.split(":")
     return int(h), int(m)
 
@@ -110,13 +106,12 @@ def register_user_jobs(application, user_id: int, chat_id: int) -> None:
 
     slots = [
         ("morning", times_row["morning_time"]),
-        ("midday", times_row["midday_time"]),
+        ("midday",  times_row["midday_time"]),
         ("evening", times_row["evening_time"]),
     ]
 
     for slot, time_str in slots:
         job_name = f"reminder_{user_id}_{slot}"
-        # Remove existing jobs with this name
         for job in application.job_queue.get_jobs_by_name(job_name):
             job.schedule_removal()
 
@@ -145,18 +140,13 @@ def remove_user_jobs(application, user_id: int) -> None:
 
 
 def register_all_jobs(application) -> None:
-    """
-    Called from bot.py after ApplicationBuilder().build() but before run_polling().
-    Seeds per-user jobs from DB and registers the global end-of-day streak job.
-    """
-    # Global streak finalization at 23:59 UTC
+    """Seed all jobs from DB. Called from bot.py before run_polling()."""
     application.job_queue.run_daily(
         callback=end_of_day_streak_update,
         time=dt_time(23, 59, tzinfo=pytz.UTC),
         name="streak_eod_global",
     )
 
-    # Per-user reminder jobs — chat_id == user_id for private Telegram chats
     rows = db.get_all_users_with_schedule()
     for row in rows:
         register_user_jobs(application, row["user_id"], row["user_id"])
