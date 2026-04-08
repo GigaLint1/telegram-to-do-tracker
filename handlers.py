@@ -7,6 +7,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
+import pytz
+
 import database as db
 import gamification as gami
 import scheduler as sched
@@ -327,12 +329,37 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     db.ensure_scheduled_times(user.id)
 
     if len(context.args) == 2:
-        slot_name, time_str = context.args
+        first_arg = context.args[0].lower()
+
+        # /schedule tz America/New_York
+        if first_arg == "tz":
+            tz_str = context.args[1]
+            try:
+                pytz.timezone(tz_str)
+            except pytz.exceptions.UnknownTimeZoneError:
+                await update.message.reply_text(
+                    f"❌ Unknown timezone: `{tz_str}`\n\n"
+                    f"Examples: `America/New_York`, `Europe/London`, `Asia/Tokyo`\n"
+                    f"Find yours at worldtimeserver.com",
+                    parse_mode="Markdown",
+                )
+                return
+            db.update_timezone(user.id, tz_str)
+            sched.register_user_jobs(context.application, user.id, user.id)
+            await update.message.reply_text(
+                f"🌍 Timezone updated to *{tz_str}*.", parse_mode="Markdown"
+            )
+            return
+
+        # /schedule morning 09:30
         slot_map = {"morning": "morning_time", "midday": "midday_time", "evening": "evening_time"}
-        slot_key = slot_map.get(slot_name.lower())
+        slot_key = slot_map.get(first_arg)
+        time_str = context.args[1]
         if not slot_key:
             await update.message.reply_text(
-                "Usage: `/schedule [morning|midday|evening] HH:MM`",
+                "Usage:\n"
+                "`/schedule [morning|midday|evening] HH:MM`\n"
+                "`/schedule tz <Timezone>`",
                 parse_mode="Markdown",
             )
             return
@@ -341,7 +368,7 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         db.update_scheduled_time(user.id, slot_key, time_str)
         sched.register_user_jobs(context.application, user.id, user.id)
-        label = SLOT_LABELS.get(slot_key, slot_name)
+        label = SLOT_LABELS.get(slot_key, first_arg)
         await update.message.reply_text(
             f"{label} reminder updated to *{time_str}*.",
             parse_mode="Markdown",
@@ -352,7 +379,8 @@ async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     keyboard = build_schedule_keyboard(times_row)
     await update.message.reply_text(
         "⏰ *Your Reminder Schedule*\n\nTap a slot to change it, or use:\n"
-        "`/schedule morning HH:MM`\n`/schedule midday HH:MM`\n`/schedule evening HH:MM`",
+        "`/schedule morning HH:MM`\n`/schedule midday HH:MM`\n`/schedule evening HH:MM`\n"
+        "`/schedule tz <Timezone>`",
         reply_markup=keyboard,
         parse_mode="Markdown",
     )
@@ -397,6 +425,9 @@ async def endtask_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     today = date.today().isoformat()
 
     elapsed = db.end_session(active["id"])
+
+    # Cancel mid-task nudge job now that the session is over
+    sched.remove_midtask_job(context.application, user.id)
 
     # Get totals NOW (includes the session just ended)
     totals = db.get_today_totals_including_active(user.id, today)
@@ -534,18 +565,21 @@ async def start_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     today = date.today().isoformat()
     db.start_session(user.id, task_id, today)
 
+    # Start the 20-minute nudge job
+    sched.register_midtask_job(context.application, user.id, user.id)
+
     duration_hint = f"\n🎯 Target: {fmt_minutes(task['duration_minutes'])}" if task["duration_minutes"] else ""
 
     try:
         await query.edit_message_text(
             f"⏱️ *Timer started for {task['name']}!*{duration_hint}\n\n"
-            f"Send /endtask when you're done.",
+            f"I'll nudge you every 20 min. Send /endtask when you're done.",
             parse_mode="Markdown",
         )
     except BadRequest:
         await context.bot.send_message(
             chat_id=user.id,
-            text=f"⏱️ *Timer started for {task['name']}!*{duration_hint}\n\nSend /endtask when you're done.",
+            text=f"⏱️ *Timer started for {task['name']}!*{duration_hint}\n\nI'll nudge you every 20 min. Send /endtask when you're done.",
             parse_mode="Markdown",
         )
 
@@ -651,3 +685,45 @@ async def edit_task_reply_handler(update: Update, context: ContextTypes.DEFAULT_
             )
 
     context.user_data.pop("pending_edit", None)
+
+
+async def prompt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /prompt              — show current mid-task prompt
+    /prompt <text>       — set new mid-task prompt
+    /prompt reset        — revert to default
+    """
+    user = update.effective_user
+    db.ensure_scheduled_times(user.id)
+
+    if not context.args:
+        current = db.get_user_prompt(user.id)
+        await update.message.reply_text(
+            f"⚙️ *Your mid-task motivational prompt:*\n\n_{current}_\n\n"
+            f"This is the instruction sent to the AI every 20 min while a timer is running.\n\n"
+            f"• To change: `/prompt <your instruction>`\n"
+            f"• To reset to default: `/prompt reset`",
+            parse_mode="Markdown",
+        )
+        return
+
+    text = " ".join(context.args).strip()
+
+    if text.lower() == "reset":
+        db.set_user_prompt(user.id, None)
+        default = db.get_user_prompt(user.id)
+        await update.message.reply_text(
+            f"✅ Mid-task prompt reset to default:\n\n_{default}_",
+            parse_mode="Markdown",
+        )
+        return
+
+    if len(text) > 500:
+        await update.message.reply_text("Prompt too long (max 500 characters).")
+        return
+
+    db.set_user_prompt(user.id, text)
+    await update.message.reply_text(
+        f"✅ Mid-task prompt updated:\n\n_{text}_",
+        parse_mode="Markdown",
+    )

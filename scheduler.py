@@ -7,7 +7,7 @@ a standalone APScheduler instance, which would create event loop conflicts.
 """
 
 import logging
-from datetime import time as dt_time, date
+from datetime import time as dt_time, date, datetime, timezone
 
 import pytz
 from telegram.ext import ContextTypes
@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 async def send_checkin_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the read-only status reminder to the user at a scheduled time."""
+    """Sends the read-only status reminder to the user at a scheduled time.
+    Silently skipped if the user has an active task timer running."""
     data = context.job.data
     user_id = data["user_id"]
     slot = data["slot"]
@@ -33,6 +34,10 @@ async def send_checkin_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     tasks = db.get_active_tasks(user_id)
     if not tasks:
+        return
+
+    # Skip scheduled reminder if user is currently mid-task
+    if db.get_active_session(user_id):
         return
 
     today = date.today().isoformat()
@@ -43,7 +48,6 @@ async def send_checkin_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     stats = db.get_user_stats(user_id)
     streak = stats["current_streak"] if stats else 0
 
-    # LLM-generated (or static fallback) motivational message
     motivation = await llm.generate_motivational_message(slot, done, total, streak)
 
     if slot == "morning":
@@ -58,7 +62,6 @@ async def send_checkin_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
             remaining = total - done
             greeting = f"🌙 *Evening wrap-up!* {remaining} task{'s' if remaining != 1 else ''} to go.\n_{motivation}_"
 
-    # Build read-only status text
     from handlers import build_status_text
     status = build_status_text(user_id)
 
@@ -70,6 +73,31 @@ async def send_checkin_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     except Exception as e:
         logger.error(f"Failed to send reminder to {user_id}: {e}")
+
+
+async def send_midtask_nudge(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fires every 20 minutes while a task timer is running."""
+    user_id = context.job.data["user_id"]
+    chat_id = context.job.chat_id
+
+    active = db.get_active_session(user_id)
+    if not active:
+        # Session ended outside of /endtask (unlikely but safe) — self-cancel
+        context.job.schedule_removal()
+        return
+
+    started = datetime.fromisoformat(active["started_at"])
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    elapsed = int((datetime.now(timezone.utc) - started).total_seconds())
+
+    custom_prompt = db.get_user_prompt(user_id)
+    message = await llm.generate_midtask_message(active["task_name"], elapsed, custom_prompt)
+
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=f"⏱️ _{message}_", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to send mid-task nudge to {user_id}: {e}")
 
 
 async def end_of_day_streak_update(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -133,10 +161,32 @@ def register_user_jobs(application, user_id: int, chat_id: int) -> None:
         logger.info(f"Registered job {job_name} at {time_str} {tz_name}")
 
 
+def register_midtask_job(application, user_id: int, chat_id: int) -> None:
+    """Start 20-min repeating nudge job. Called from start_task_callback."""
+    remove_midtask_job(application, user_id)  # clear any stale job first
+    application.job_queue.run_repeating(
+        callback=send_midtask_nudge,
+        interval=1200,  # 20 minutes
+        first=1200,     # first nudge after 20 min, not immediately
+        chat_id=chat_id,
+        user_id=user_id,
+        name=f"midtask_nudge_{user_id}",
+        data={"user_id": user_id},
+    )
+    logger.info(f"Registered mid-task nudge job for user {user_id}")
+
+
+def remove_midtask_job(application, user_id: int) -> None:
+    """Cancel the mid-task nudge job. Called from endtask_handler."""
+    for job in application.job_queue.get_jobs_by_name(f"midtask_nudge_{user_id}"):
+        job.schedule_removal()
+
+
 def remove_user_jobs(application, user_id: int) -> None:
     for slot in ("morning", "midday", "evening"):
         for job in application.job_queue.get_jobs_by_name(f"reminder_{user_id}_{slot}"):
             job.schedule_removal()
+    remove_midtask_job(application, user_id)
 
 
 def register_all_jobs(application) -> None:

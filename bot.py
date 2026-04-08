@@ -21,6 +21,7 @@ from handlers import (
     edittask_handler,
     endtask_handler,
     list_tasks_handler,
+    prompt_handler,
     remove_task_callback,
     remove_task_handler,
     schedule_change_callback,
@@ -42,6 +43,7 @@ BOT_COMMANDS = [
     BotCommand("listtasks",  "List all active tasks"),
     BotCommand("stats",      "View XP, level, and streak"),
     BotCommand("schedule",   "Change reminder times"),
+    BotCommand("prompt",     "Change your mid-task AI prompt"),
     BotCommand("start",      "Welcome and setup"),
 ]
 
@@ -85,6 +87,7 @@ def main() -> None:
     application.add_handler(CommandHandler("starttask",  starttask_handler))
     application.add_handler(CommandHandler("endtask",    endtask_handler))
     application.add_handler(CommandHandler("edittask",   edittask_handler))
+    application.add_handler(CommandHandler("prompt",     prompt_handler))
 
     # Callback queries
     application.add_handler(CallbackQueryHandler(remove_task_callback,      pattern=r"^remove_task:"))

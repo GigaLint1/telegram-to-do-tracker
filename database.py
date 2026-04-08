@@ -86,12 +86,16 @@ def init_db() -> None:
             );
         """)
 
-    # Migrate existing tasks table to add duration_minutes if not present
+    # Migrations — safe try/except for columns added after initial deploy
     with get_db() as conn:
         try:
             conn.execute("ALTER TABLE tasks ADD COLUMN duration_minutes INTEGER")
         except sqlite3.OperationalError:
-            pass  # Column already exists
+            pass
+        try:
+            conn.execute("ALTER TABLE scheduled_times ADD COLUMN mid_task_prompt TEXT")
+        except sqlite3.OperationalError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +341,29 @@ def update_timezone(user_id: int, tz: str) -> None:
 def get_all_users_with_schedule() -> list:
     with get_db() as conn:
         return conn.execute("SELECT * FROM scheduled_times").fetchall()
+
+
+DEFAULT_MID_TASK_PROMPT = (
+    "The user is currently working on a task. Send them a very short (1 sentence), "
+    "specific and energetic motivational nudge. No generic phrases. No emojis in text."
+)
+
+
+def get_user_prompt(user_id: int) -> str:
+    """Returns the user's custom mid-task prompt, or the default if none is set."""
+    row = get_scheduled_times(user_id)
+    if row and row["mid_task_prompt"]:
+        return row["mid_task_prompt"]
+    return DEFAULT_MID_TASK_PROMPT
+
+
+def set_user_prompt(user_id: int, prompt: Optional[str]) -> None:
+    """Set (or clear with None) the user's custom mid-task prompt."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE scheduled_times SET mid_task_prompt = ? WHERE user_id = ?",
+            (prompt, user_id),
+        )
 
 
 # ---------------------------------------------------------------------------

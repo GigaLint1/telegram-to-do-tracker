@@ -78,3 +78,53 @@ async def generate_motivational_message(
         logger.warning(f"Groq API call failed: {e} — using static fallback")
 
     return random.choice(MOTIVATIONAL_MESSAGES)
+
+
+def _fmt_secs(seconds: int) -> str:
+    """Minimal duration formatter — avoids circular import from handlers.py."""
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    hours = minutes // 60
+    mins = minutes % 60
+    if hours > 0 and mins > 0:
+        return f"{hours}h {mins}m"
+    elif hours > 0:
+        return f"{hours}h"
+    return f"{mins}m"
+
+
+async def generate_midtask_message(
+    task_name: str,
+    elapsed_seconds: int,
+    custom_prompt: str,
+) -> str:
+    """
+    Generate a mid-task motivational nudge using the user's custom prompt.
+    Falls back to a random static message on any failure.
+    """
+    client = _get_client()
+    if client is None:
+        return random.choice(MOTIVATIONAL_MESSAGES)
+
+    elapsed_str = _fmt_secs(elapsed_seconds)
+    prompt = (
+        f"{custom_prompt}\n\n"
+        f"Context: The user has been working on '{task_name}' for {elapsed_str} in this session. "
+        f"Reply with ONLY the message text, no quotes."
+    )
+
+    try:
+        response = await client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=50,
+            temperature=0.95,
+        )
+        message = response.choices[0].message.content.strip()
+        if message:
+            return message
+    except Exception as e:
+        logger.warning(f"Groq mid-task API call failed: {e} — using static fallback")
+
+    return random.choice(MOTIVATIONAL_MESSAGES)
