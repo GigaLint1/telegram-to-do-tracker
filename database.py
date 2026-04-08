@@ -3,7 +3,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-DB_PATH = "todo_bot.db"
+import os
+DB_PATH = os.environ.get("DB_PATH", "todo_bot.db")
 
 
 @contextmanager
