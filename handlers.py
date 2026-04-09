@@ -143,8 +143,8 @@ def build_status_text(user_id: int) -> str:
     Build the read-only /status message text.
     Shows each task's completion state, time tracked today, and running timer.
     """
-    today = date.today().isoformat()
-    today_label = datetime.now().strftime("%a %-d %b")
+    today = get_user_today(user_id)
+    today_label = get_user_now_label(user_id)
 
     tasks = db.get_active_tasks(user_id)
     if not tasks:
@@ -204,6 +204,34 @@ def build_status_text(user_id: int) -> str:
         lines.append(f"🔥 Streak: {stats['current_streak']} day{'s' if stats['current_streak'] != 1 else ''}")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Timezone-aware date helper
+# ---------------------------------------------------------------------------
+
+def get_user_today(user_id: int) -> str:
+    """Return today's date string (YYYY-MM-DD) in the user's configured timezone."""
+    times_row = db.get_scheduled_times(user_id)
+    if times_row and times_row.get("timezone"):
+        try:
+            tz = pytz.timezone(times_row["timezone"])
+            return datetime.now(tz).date().isoformat()
+        except pytz.exceptions.UnknownTimeZoneError:
+            pass
+    return date.today().isoformat()
+
+
+def get_user_now_label(user_id: int) -> str:
+    """Return a formatted date label (e.g. 'Tue 8 Apr') in the user's timezone."""
+    times_row = db.get_scheduled_times(user_id)
+    if times_row and times_row.get("timezone"):
+        try:
+            tz = pytz.timezone(times_row["timezone"])
+            return datetime.now(tz).strftime("%a %-d %b")
+        except pytz.exceptions.UnknownTimeZoneError:
+            pass
+    return datetime.now().strftime("%a %-d %b")
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +360,7 @@ async def list_tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Today's task progress with manual-done and quick-add buttons."""
     user = update.effective_user
-    today = date.today().isoformat()
+    today = get_user_today(user.id)
     text = build_status_text(user.id)
     keyboard = build_status_keyboard(user.id, today)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
@@ -443,7 +471,7 @@ async def endtask_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     task_id = active["task_id"]
     task_name = active["task_name"]
     duration_minutes = active["duration_minutes"]
-    today = date.today().isoformat()
+    today = get_user_today(user.id)
 
     elapsed = db.end_session(active["id"])
 
@@ -583,7 +611,7 @@ async def start_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("Task not found.", show_alert=True)
         return
 
-    today = date.today().isoformat()
+    today = get_user_today(user.id)
     db.start_session(user.id, task_id, today)
 
     # Start the 20-minute nudge job
@@ -704,7 +732,7 @@ async def manual_complete_callback(update: Update, context: ContextTypes.DEFAULT
 
     user = update.effective_user
     task_id = int(query.data.split(":")[1])
-    today = date.today().isoformat()
+    today = get_user_today(user.id)
 
     task = db.get_task(task_id, user.id)
     if not task:
@@ -882,7 +910,7 @@ async def todo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def week_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show last 7 days' completion summary."""
     user = update.effective_user
-    today = date.today()
+    today = date.fromisoformat(get_user_today(user.id))
 
     lines = ["📅 *Last 7 Days*", ""]
     total_done = 0

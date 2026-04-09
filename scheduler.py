@@ -40,7 +40,9 @@ async def send_checkin_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     if db.get_active_session(user_id):
         return
 
-    today = date.today().isoformat()
+    # Use the user's local date, not the server's UTC date
+    from handlers import get_user_today
+    today = get_user_today(user_id)
     completed_ids = set(db.get_today_completions(user_id, today))
     done = len([t for t in tasks if t["id"] in completed_ids])
     total = len(tasks)
