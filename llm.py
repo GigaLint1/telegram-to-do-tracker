@@ -108,7 +108,6 @@ async def generate_midtask_message(
     elapsed_str = _fmt_secs(elapsed_seconds)
     prompt = (
         f"{custom_prompt}\n\n"
-        f"Reply with ONLY the message text, no quotes."
     )
 
     try:
