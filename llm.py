@@ -66,7 +66,7 @@ async def generate_motivational_message(
         response = await client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=60,
+            max_tokens=120,
             temperature=0.9,
         )
         message = response.choices[0].message.content.strip()
@@ -108,13 +108,15 @@ async def generate_midtask_message(
     elapsed_str = _fmt_secs(elapsed_seconds)
     prompt = (
         f"{custom_prompt}\n\n"
+        f"Context: the user has been working on '{task_name}' for {elapsed_str}.\n"
+        f"Reply with ONLY the message text, no labels or preamble."
     )
 
     try:
         response = await client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=50,
+            max_tokens=120,
             temperature=0.95,
         )
         message = response.choices[0].message.content.strip()
